@@ -1,9 +1,10 @@
 import signal
-import sqlite3
-import subprocess
 import sys
 import time
 from datetime import datetime
+
+import db
+import macos
 
 # How often we poll the frontmost application, in seconds.
 POLL_INTERVAL = 1
@@ -13,80 +14,40 @@ POLL_INTERVAL = 1
 # tracker is killed or the machine sleeps before the next app switch.
 FLUSH_INTERVAL = 30
 
-# Category assigned to apps we have not classified yet. The tracker never
-# blocks to ask; categorization happens later in the viewer/dashboard.
-DEFAULT_CATEGORY = "Uncategorized"
+# How long without input before we stop crediting time to the foreground app.
+# Two minutes is long enough to read a page without being marked away.
+IDLE_THRESHOLD = 120
 
 
-connection = sqlite3.connect("activity.db")
+connection = db.connect()
 cursor = connection.cursor()
 
 
-# DATABASE SETUP
-
-connection.execute("""
-CREATE TABLE IF NOT EXISTS activities (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    app TEXT,
-    start_time REAL,
-    end_time REAL,
-    duration REAL
-)
-""")
-
-connection.execute("""
-CREATE TABLE IF NOT EXISTS app_categories (
-    app TEXT PRIMARY KEY,
-    category TEXT
-)
-""")
-
-connection.commit()
-
-
-## get the name of the current application
-def get_current_app():
-    result = subprocess.run(
-        [
-            "osascript",
-            "-e",
-            'tell application "System Events" to get name of first application process whose frontmost is true'
-        ],
-        capture_output=True,
-        text=True
-    )
-
-    return result.stdout.strip()
-
-
-## register an app we have not seen before so the dashboard can
+## register an app we have not seen before so the viewer can
 ## offer it up for categorization later
 def ensure_app_known(app):
     cursor.execute(
         "INSERT OR IGNORE INTO app_categories (app, category) VALUES (?, ?)",
-        (app, DEFAULT_CATEGORY)
+        (app, db.DEFAULT_CATEGORY)
     )
     connection.commit()
 
 
 ## look up an app's category without ever prompting
 def get_category(app):
-    cursor.execute(
-        "SELECT category FROM app_categories WHERE app = ?",
-        (app,)
-    )
-
+    cursor.execute("SELECT category FROM app_categories WHERE app = ?", (app,))
     result = cursor.fetchone()
 
-    return result[0] if result else DEFAULT_CATEGORY
+    return result[0] if result else db.DEFAULT_CATEGORY
 
 
 ## open a new session row and return its id, so we can keep
-## updating it in place while the app stays in the foreground
-def open_session(app, start_time):
+## updating it in place while the session stays current
+def open_session(app, window_title, start_time):
     cursor.execute(
-        "INSERT INTO activities (app, start_time, end_time, duration) VALUES (?, ?, ?, ?)",
-        (app, start_time, start_time, 0.0)
+        """INSERT INTO activities (app, window_title, start_time, end_time, duration)
+           VALUES (?, ?, ?, ?, ?)""",
+        (app, window_title, start_time, start_time, 0.0)
     )
     connection.commit()
 
@@ -95,6 +56,10 @@ def open_session(app, start_time):
 
 ## bring an open session row up to date with the current wall clock
 def update_session(session_id, start_time, end_time):
+    # end_time can never precede start_time, which matters when we retroactively
+    # close a session at the moment input stopped.
+    end_time = max(end_time, start_time)
+
     cursor.execute(
         "UPDATE activities SET end_time = ?, duration = ? WHERE id = ?",
         (end_time, end_time - start_time, session_id)
@@ -102,37 +67,91 @@ def update_session(session_id, start_time, end_time):
     connection.commit()
 
 
-def format_session(app, start_time, end_time, category):
+def describe(app, window_title):
+    if app == db.IDLE_APP:
+        return "Idle"
+
+    return f"{app} - {window_title}" if window_title else app
+
+
+def format_session(app, window_title, start_time, end_time, category):
     start_readable = datetime.fromtimestamp(start_time)
-    end_readable = datetime.fromtimestamp(end_time)
-    duration = end_time - start_time
+    end_readable = datetime.fromtimestamp(max(end_time, start_time))
+    duration = max(end_time - start_time, 0)
 
     return (
-        f"{app}: "
+        f"{describe(app, window_title)}: "
         f"{start_readable.strftime('%I:%M:%S %p')} → "
         f"{end_readable.strftime('%I:%M:%S %p')} "
         f"({duration:.2f} seconds) - {category}"
     )
 
 
-previous_app = get_current_app()
-start_time = time.time()
-last_flush = start_time
+class Tracker:
+    def __init__(self):
+        self.app = None
+        self.window_title = ""
+        self.start_time = None
+        self.session_id = None
+        self.last_flush = None
 
-ensure_app_known(previous_app)
-session_id = open_session(previous_app, start_time)
+    def start_session(self, app, window_title, start_time):
+        if app != db.IDLE_APP:
+            ensure_app_known(app)
 
-print("Started tracking:", previous_app)
+        self.app = app
+        self.window_title = window_title
+        self.start_time = start_time
+        self.session_id = open_session(app, window_title, start_time)
+        self.last_flush = start_time
+
+    def close_session(self, end_time, announce=True):
+        if self.session_id is None:
+            return
+
+        update_session(self.session_id, self.start_time, end_time)
+
+        if announce:
+            print(format_session(
+                self.app, self.window_title,
+                self.start_time, end_time,
+                get_category(self.app)
+            ))
+
+        self.session_id = None
+
+    def flush(self, now):
+        if self.session_id is None:
+            return
+
+        update_session(self.session_id, self.start_time, now)
+        self.last_flush = now
+
+    def is_current(self, app, window_title):
+        return self.session_id is not None and (self.app, self.window_title) == (app, window_title)
+
+
+tracker = Tracker()
+
+app, window_title = macos.get_frontmost()
+
+if app:
+    tracker.start_session(app, window_title, time.time())
+    print("Started tracking:", describe(app, window_title))
+else:
+    # Could not read the foreground app at all. Almost always a missing
+    # Accessibility permission, so say so instead of looping silently.
+    print("Could not read the frontmost application.")
+    print("Grant Accessibility permission in System Settings > Privacy & Security.")
+    print("Waiting for the foreground app to become readable...")
 
 
 ## make sure a Ctrl-C or a shutdown signal still records the
 ## session that is currently in progress
 def handle_exit(signum, frame):
-    end_time = time.time()
-    update_session(session_id, start_time, end_time)
+    tracker.close_session(time.time())
 
     print()
-    print(format_session(previous_app, start_time, end_time, get_category(previous_app)))
     print("Stopped tracking.")
 
     connection.close()
@@ -144,35 +163,45 @@ signal.signal(signal.SIGTERM, handle_exit)
 
 
 while True:
-    current_app = get_current_app()
+    now = time.time()
+    idle_seconds = macos.get_idle_seconds()
 
-    # osascript can briefly return nothing (for example during a
-    # Spaces switch). Treat that as "no change" rather than a new app.
-    if not current_app:
+    if idle_seconds >= IDLE_THRESHOLD:
+        # The user stopped interacting roughly `idle_seconds` ago, so the
+        # active session ended then, not now. Without this, leaving the
+        # laptop open on an editor would record hours of "Coding".
+        if tracker.app != db.IDLE_APP:
+            tracker.close_session(now - idle_seconds)
+            tracker.start_session(db.IDLE_APP, "", now - idle_seconds)
+        elif now - tracker.last_flush >= FLUSH_INTERVAL:
+            tracker.flush(now)
+
         time.sleep(POLL_INTERVAL)
         continue
 
-    if current_app != previous_app:
+    app, window_title = macos.get_frontmost()
+
+    # osascript can briefly return nothing, for example during a Spaces
+    # switch. Treat that as "no change" rather than as a new app.
+    if not app:
+        time.sleep(POLL_INTERVAL)
+        continue
+
+    if tracker.app == db.IDLE_APP:
+        # Input resumed. End the idle stretch now so the gap is accounted
+        # for, and start crediting the foreground app again.
+        tracker.close_session(now)
+        tracker.start_session(app, window_title, now)
+
+    elif not tracker.is_current(app, window_title):
         # Stamp the end of the session before doing any other work, so
         # nothing that happens afterwards inflates the recorded duration.
-        end_time = time.time()
+        tracker.close_session(now)
+        tracker.start_session(app, window_title, now)
 
-        update_session(session_id, start_time, end_time)
-
-        print(format_session(previous_app, start_time, end_time, get_category(previous_app)))
-
-        previous_app = current_app
-        start_time = end_time
-        last_flush = end_time
-
-        ensure_app_known(current_app)
-        session_id = open_session(current_app, start_time)
-
-    elif time.time() - last_flush >= FLUSH_INTERVAL:
-        # Same app still in the foreground: keep the open row current so
-        # a long session survives an unexpected exit.
-        now = time.time()
-        update_session(session_id, start_time, now)
-        last_flush = now
+    elif now - tracker.last_flush >= FLUSH_INTERVAL:
+        # Same session still current: keep the open row up to date so a long
+        # stretch survives an unexpected exit.
+        tracker.flush(now)
 
     time.sleep(POLL_INTERVAL)
