@@ -1,102 +1,124 @@
 import sqlite3
 from datetime import datetime
 
+DEFAULT_CATEGORY = "Uncategorized"
+
+
 connection = sqlite3.connect("activity.db")
 cursor = connection.cursor()
 
-app_categories = {
-    "Electron": "Coding",
-    "Opera": "Entertainment",
-    "Spotify": "Entertainment",
-    "Obsidian": "School",
-    "firefox": "Other",
-    "Terminal": "Coding"
-}
 
-## connect to database 
-connection = sqlite3.connect("activity.db")
+def format_duration(seconds):
+    minutes = int(seconds // 60)
+    remainder = seconds % 60
 
-cursor = connection.cursor()
-
-cursor.execute("SELECT app, category FROM app_categories")
-
-categories = cursor.fetchall()
-
-category_map = dict(categories)
-
-print(categories)
-
-cursor.execute("SELECT app, start_time, end_time, duration FROM activities")
-
-activities = cursor.fetchall()
+    return f"{minutes}m {remainder:.1f}s"
 
 
-for app, start_time, end_time, duration in activities:
-    start_readable = datetime.fromtimestamp(start_time)
-    end_readable = datetime.fromtimestamp(end_time)
-
-    print(
-        f"{app}: "
-        f"{start_readable.strftime('%I:%M:%S %p')} → "
-        f"{end_readable.strftime('%I:%M:%S %p')} "
-        f"({duration:.2f} seconds)"
+## the tracker no longer blocks to ask for categories, so this is where
+## anything it recorded as Uncategorized gets classified
+def categorize_pending_apps():
+    cursor.execute(
+        "SELECT app FROM app_categories WHERE category = ? ORDER BY app",
+        (DEFAULT_CATEGORY,)
     )
 
-cursor.execute("""
-    SELECT app, start_time, DATE(start_time, 'unixepoch')
-    FROM activities
-""")
+    pending = [row[0] for row in cursor.fetchall()]
 
-dates = cursor.fetchall()
+    if not pending:
+        return
 
-for app, timestamp, date in dates:
-    print(app, date)
+    print(f"{len(pending)} app(s) still need a category. Press Enter to skip any.")
 
-today = datetime.now().strftime("%Y-%m-%d")
+    for app in pending:
+        category = input(f"What category should {app} belong to? ").strip()
 
-cursor.execute("""
-    SELECT SUM(duration)
-    FROM activities
-    WHERE DATE(start_time, 'unixepoch', 'localtime') = ?
-""", (today,))
+        if not category:
+            continue
 
-total_time = cursor.fetchone()[0]
+        cursor.execute(
+            "UPDATE app_categories SET category = ? WHERE app = ?",
+            (category, app)
+        )
+        connection.commit()
 
-cursor.execute("""
-    SELECT app, SUM(duration)
-    FROM activities
-    WHERE DATE(start_time, 'unixepoch', 'localtime') = ?
-    GROUP BY app
-""", (today,))
+    print()
 
-summary = cursor.fetchall()
 
-category_totals = {}
+def load_category_map():
+    cursor.execute("SELECT app, category FROM app_categories")
 
-print("\n===== TOTAL TIME BY APP =====")
+    return dict(cursor.fetchall())
 
-## finds total time by app
-for app, total_duration in summary:
-    category = category_map.get(app, "Other")
-    category_totals[category] = category_totals.get(category, 0) + total_duration
-    minutes = int(total_duration // 60)
-    seconds = int(total_duration % 60)
 
-    percentage = (total_duration / total_time) * 100
+def print_timeline(category_map):
+    cursor.execute("SELECT app, start_time, end_time, duration FROM activities ORDER BY start_time")
 
-    print(
-        f"{app}: {minutes}m {seconds:.1f}s "
-        f"({percentage:.1f}%) - {category}"
-    )
+    print("===== TIMELINE =====")
 
-print("\n===== TOTAL TIME BY CATEGORY =====")
+    for app, start_time, end_time, duration in cursor.fetchall():
+        start_readable = datetime.fromtimestamp(start_time)
+        end_readable = datetime.fromtimestamp(end_time)
 
-## finds total time by category
-for category, total_duration in category_totals.items():
-    minutes = int(total_duration // 60)
-    seconds = total_duration % 60
-    percentage = (total_duration / total_time) * 100
+        print(
+            f"{app}: "
+            f"{start_readable.strftime('%I:%M:%S %p')} → "
+            f"{end_readable.strftime('%I:%M:%S %p')} "
+            f"({duration:.2f} seconds) - {category_map.get(app, DEFAULT_CATEGORY)}"
+        )
 
-    print(f"{category}: {minutes}m {seconds:.1f}s ({percentage:.1f}%)")
+
+def print_daily_summary(category_map):
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    cursor.execute("""
+        SELECT app, SUM(duration)
+        FROM activities
+        WHERE DATE(start_time, 'unixepoch', 'localtime') = ?
+        GROUP BY app
+        ORDER BY SUM(duration) DESC
+    """, (today,))
+
+    summary = cursor.fetchall()
+
+    total_time = sum(duration for _, duration in summary)
+
+    # Guard against a fresh database or a day with no recorded activity,
+    # which would otherwise divide by zero below.
+    if not total_time:
+        print(f"\nNo activity recorded for {today} yet.")
+        return
+
+    category_totals = {}
+
+    print("\n===== TOTAL TIME BY APP =====")
+
+    ## finds total time by app
+    for app, total_duration in summary:
+        category = category_map.get(app, DEFAULT_CATEGORY)
+        category_totals[category] = category_totals.get(category, 0) + total_duration
+        percentage = (total_duration / total_time) * 100
+
+        print(f"{app}: {format_duration(total_duration)} ({percentage:.1f}%) - {category}")
+
+    print("\n===== TOTAL TIME BY CATEGORY =====")
+
+    ## finds total time by category
+    for category, total_duration in sorted(
+        category_totals.items(), key=lambda item: item[1], reverse=True
+    ):
+        percentage = (total_duration / total_time) * 100
+
+        print(f"{category}: {format_duration(total_duration)} ({percentage:.1f}%)")
+
+    print(f"\nTotal tracked today: {format_duration(total_time)}")
+
+
+categorize_pending_apps()
+
+category_map = load_category_map()
+
+print_timeline(category_map)
+print_daily_summary(category_map)
 
 connection.close()
