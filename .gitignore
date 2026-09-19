@@ -2,3 +2,7 @@
 __pycache__/
 *.pyc
 .DS_Store
+
+# Personal activity data should never be committed
+activity.db
+activity.db-journal
