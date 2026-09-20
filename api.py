@@ -27,7 +27,14 @@ DEV_ORIGINS = [
     "http://127.0.0.1:5173",
     "http://localhost:3000",
     "http://127.0.0.1:3000",
+    "http://localhost:4173",
+    "http://127.0.0.1:4173",
 ]
+
+# Hosted previews of the dashboard are served from a different origin and proxy
+# their API calls back here, so they need to be allowed explicitly. Anchored at
+# both ends so a lookalike domain cannot match.
+PREVIEW_ORIGIN_PATTERN = r"https://[\w.-]+\.(pplx\.app|perplexity\.ai)"
 
 # A session is treated as still in progress if its end time is within this many
 # seconds of now, which must stay above the tracker's FLUSH_INTERVAL.
@@ -43,6 +50,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=DEV_ORIGINS,
+    allow_origin_regex=PREVIEW_ORIGIN_PATTERN,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -53,10 +61,12 @@ def get_connection():
 
     SQLite connections cannot be shared across threads, and uvicorn serves
     requests from a thread pool, so a single module-level connection would
-    intermittently raise.
+    intermittently raise. Setup and teardown of this dependency also land on
+    different threadpool threads, which is why the thread check is relaxed —
+    see `db.connect`.
     """
 
-    connection = db.connect()
+    connection = db.connect(same_thread_only=False)
 
     try:
         yield connection

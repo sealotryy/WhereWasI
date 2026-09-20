@@ -18,8 +18,20 @@ IDLE_APP = "__idle__"
 IDLE_CATEGORY = "Idle"
 
 
-def connect(path=DB_PATH):
-    connection = sqlite3.connect(path)
+def connect(path=DB_PATH, same_thread_only=True):
+    """Open a connection and bring the schema up to date.
+
+    `same_thread_only=False` is for request handlers. FastAPI runs a `yield`
+    dependency's setup and its cleanup on *different* threadpool threads, so a
+    default connection raises on `close()` even though the query itself
+    succeeded. That exception lands after the response body, which kills the
+    connection mid-flight and makes the browser report a CORS failure rather
+    than anything resembling the real cause. Relaxing the check is safe here
+    because each request gets its own connection and only one thread ever
+    touches it at a time.
+    """
+
+    connection = sqlite3.connect(path, check_same_thread=same_thread_only)
     ensure_schema(connection)
 
     return connection

@@ -17,6 +17,7 @@ code, and the API binds to localhost only.
 | `queries.py` | All reading and aggregation. Returns plain JSON-serializable data. |
 | `view_data.py` | Command-line reports. Formatting only. |
 | `api.py` | Local HTTP API over `queries.py`. |
+| `dashboard/` | React dashboard served separately. Reads the API, writes categories. |
 | `test.py` | Diagnostic that checks the system probes work. |
 
 ## Setup
@@ -84,6 +85,42 @@ Interactive docs at <http://127.0.0.1:8000/docs>.
 
 There is no authentication because the server is not reachable from the
 network. If you ever change the bind address, add auth first.
+
+## Dashboard
+
+A React dashboard that reads the API and renders the day: active versus idle
+time, where the time went by app and category, an expandable list of window
+titles per app, a session timeline, and a fourteen-day trend. Apps that have not
+been classified appear in a panel at the top with a text field and one-click
+buttons for categories already in use, so nothing stays `Uncategorized` unless
+you leave it that way.
+
+It needs two processes. Start the API first, from the project root:
+
+```
+uvicorn api:app --port 8000
+```
+
+Then the dashboard, from `dashboard/`:
+
+```
+npm install
+npm run dev
+```
+
+Open the address Vite prints, usually `http://localhost:5173`. The dashboard
+polls `/api/status` every fifteen seconds and, while showing today, refreshes
+the day's figures every thirty, so leaving the tab open keeps it current.
+
+For a production build:
+
+```
+npm run build
+```
+
+`dist/` can then be served by any static file server. The API's allowed origins
+are listed in `DEV_ORIGINS` in `api.py`; if you serve the build from a different
+port, add it there or the browser will block the requests.
 
 ## Notes on the data
 
