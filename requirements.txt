@@ -1,0 +1,4 @@
+# The tracker and the CLI viewer need nothing beyond the standard library.
+# These are only required to run the local API (api.py).
+fastapi>=0.110
+uvicorn[standard]>=0.27
