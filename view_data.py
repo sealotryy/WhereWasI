@@ -4,10 +4,12 @@ This is only presentation. All reading and aggregation lives in queries.py so
 the same numbers can be served over HTTP later without duplicating the logic.
 
 Usage:
-    python view_data.py                 # today
-    python view_data.py 2026-09-19      # a specific day
-    python view_data.py --week          # last 7 days
-    python view_data.py --days          # which days have data
+    python view_data.py                      # today
+    python view_data.py 2026-09-19           # a specific day
+    python view_data.py --week               # last 7 days
+    python view_data.py --days               # which days have data
+    python view_data.py --categorize         # name any uncategorized apps
+    python view_data.py --set Opera=Leisure  # change one app's category
 """
 
 import sys
@@ -29,13 +31,30 @@ def format_duration(seconds):
     return f"{minutes}m {remainder:.1f}s"
 
 
-def prompt_for_categories(connection):
+def known_categories(connection):
+    return sorted(
+        {
+            category for category in queries.category_map(connection).values()
+            if category not in (db.DEFAULT_CATEGORY, db.IDLE_CATEGORY)
+        }
+    )
+
+
+def prompt_for_categories(connection, announce_empty=False):
     pending = queries.uncategorized_apps(connection)
 
     if not pending:
+        if announce_empty:
+            print("Every app seen so far already has a category.")
+
         return
 
     print(f"{len(pending)} app(s) still need a category. Press Enter to skip any.")
+
+    existing = known_categories(connection)
+
+    if existing:
+        print(f"Existing categories: {', '.join(existing)}")
 
     for app in pending:
         category = input(f"What category should {app} belong to? ").strip()
@@ -44,6 +63,20 @@ def prompt_for_categories(connection):
             queries.set_category(connection, app, category)
 
     print()
+
+
+def apply_assignment(connection, assignment):
+    """Handle --set APP=CATEGORY, for fixing a category after the fact."""
+
+    app, _, category = assignment.partition("=")
+    app, category = app.strip(), category.strip()
+
+    if not app or not category:
+        print(f"Expected APP=CATEGORY, got {assignment!r}")
+        return
+
+    queries.set_category(connection, app, category)
+    print(f"{app} is now categorized as {category}.")
 
 
 def print_timeline(connection, day):
@@ -157,6 +190,17 @@ def main(argv):
             if not days:
                 print("  (none yet)")
 
+            return
+
+        if "--set" in argv:
+            index = argv.index("--set")
+            assignment = argv[index + 1] if index + 1 < len(argv) else ""
+
+            apply_assignment(connection, assignment)
+            return
+
+        if "--categorize" in argv:
+            prompt_for_categories(connection, announce_empty=True)
             return
 
         prompt_for_categories(connection)
