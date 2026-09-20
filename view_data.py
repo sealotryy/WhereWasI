@@ -1,42 +1,36 @@
-from datetime import datetime
+"""Command-line view of tracked activity.
+
+This is only presentation. All reading and aggregation lives in queries.py so
+the same numbers can be served over HTTP later without duplicating the logic.
+
+Usage:
+    python view_data.py                 # today
+    python view_data.py 2026-09-19      # a specific day
+    python view_data.py --week          # last 7 days
+    python view_data.py --days          # which days have data
+"""
+
+import sys
 
 import db
+import queries
 
-# Glancing at an app for a moment is noise in the timeline. Short sessions are
-# still stored and still counted in the totals; they are just not listed.
-MIN_DISPLAY_SECONDS = 2
-
-# How many window titles to list per app in the detail breakdown.
 TITLES_PER_APP = 5
 
 
-connection = db.connect()
-cursor = connection.cursor()
-
-
 def format_duration(seconds):
-    minutes = int(seconds // 60)
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
     remainder = seconds % 60
+
+    if hours:
+        return f"{hours}h {minutes}m"
 
     return f"{minutes}m {remainder:.1f}s"
 
 
-def describe(app, window_title):
-    if app == db.IDLE_APP:
-        return "Idle"
-
-    return f"{app} - {window_title}" if window_title else app
-
-
-## the tracker no longer blocks to ask for categories, so this is where
-## anything it recorded as Uncategorized gets classified
-def categorize_pending_apps():
-    cursor.execute(
-        "SELECT app FROM app_categories WHERE category = ? AND app != ? ORDER BY app",
-        (db.DEFAULT_CATEGORY, db.IDLE_APP)
-    )
-
-    pending = [row[0] for row in cursor.fetchall()]
+def prompt_for_categories(connection):
+    pending = queries.uncategorized_apps(connection)
 
     if not pending:
         return
@@ -46,136 +40,139 @@ def categorize_pending_apps():
     for app in pending:
         category = input(f"What category should {app} belong to? ").strip()
 
-        if not category:
-            continue
-
-        cursor.execute(
-            "UPDATE app_categories SET category = ? WHERE app = ?", (category, app)
-        )
-        connection.commit()
+        if category:
+            queries.set_category(connection, app, category)
 
     print()
 
 
-def load_category_map():
-    cursor.execute("SELECT app, category FROM app_categories")
+def print_timeline(connection, day):
+    sessions = queries.timeline(connection, day)
+    shown = [s for s in sessions if s["seconds"] >= queries.MIN_DISPLAY_SECONDS]
 
-    return dict(cursor.fetchall())
-
-
-def rows_for_day(day):
-    cursor.execute("""
-        SELECT app, window_title, start_time, end_time, duration
-        FROM activities
-        WHERE DATE(start_time, 'unixepoch', 'localtime') = ?
-        ORDER BY start_time
-    """, (day,))
-
-    return cursor.fetchall()
-
-
-def print_timeline(rows, category_map):
     print("===== TIMELINE =====")
 
-    hidden = 0
+    if not sessions:
+        print("(nothing recorded)")
+        return
 
-    for app, window_title, start_time, end_time, duration in rows:
-        if duration < MIN_DISPLAY_SECONDS:
-            hidden += 1
-            continue
-
-        start_readable = datetime.fromtimestamp(start_time)
-        end_readable = datetime.fromtimestamp(end_time)
+    for session in shown:
+        start = session["start"][11:19]
+        end = session["end"][11:19]
 
         print(
-            f"{describe(app, window_title)}: "
-            f"{start_readable.strftime('%I:%M:%S %p')} → "
-            f"{end_readable.strftime('%I:%M:%S %p')} "
-            f"({format_duration(duration)}) - "
-            f"{category_map.get(app, db.DEFAULT_CATEGORY)}"
+            f"{start} → {end}  "
+            f"{format_duration(session['seconds']):>12}  "
+            f"{session['label']}  [{session['category']}]"
         )
 
+    hidden = len(sessions) - len(shown)
+
     if hidden:
-        print(f"({hidden} session(s) under {MIN_DISPLAY_SECONDS}s hidden)")
+        print(f"({hidden} session(s) under {queries.MIN_DISPLAY_SECONDS}s hidden)")
 
 
-def print_summary(rows, category_map):
-    active = [row for row in rows if row[0] != db.IDLE_APP]
-    idle_total = sum(row[4] for row in rows if row[0] == db.IDLE_APP)
-    active_total = sum(row[4] for row in active)
+def print_summary(connection, day):
+    summary = queries.daily_summary(connection, day, titles_per_app=TITLES_PER_APP)
 
-    if not active_total:
-        print("\nNo active time recorded for this day yet.")
+    if not summary["active_seconds"]:
+        print("\nNo active time recorded for this day.")
 
-        if idle_total:
-            print(f"Idle: {format_duration(idle_total)}")
+        if summary["idle_seconds"]:
+            print(f"Idle: {format_duration(summary['idle_seconds'])}")
 
         return
 
-    app_totals = {}
-    title_totals = {}
-    category_totals = {}
-
-    for app, window_title, _, _, duration in active:
-        app_totals[app] = app_totals.get(app, 0) + duration
-
-        key = (app, window_title or "(no title)")
-        title_totals[key] = title_totals.get(key, 0) + duration
-
-        category = category_map.get(app, db.DEFAULT_CATEGORY)
-        category_totals[category] = category_totals.get(category, 0) + duration
-
-    def by_value(totals):
-        return sorted(totals.items(), key=lambda item: item[1], reverse=True)
-
     print("\n===== TOTAL TIME BY APP =====")
 
-    ## finds total time by app
-    for app, total_duration in by_value(app_totals):
-        percentage = (total_duration / active_total) * 100
-        category = category_map.get(app, db.DEFAULT_CATEGORY)
+    for app in summary["apps"]:
+        print(
+            f"{app['app']}: {format_duration(app['seconds'])} "
+            f"({app['share']}%) - {app['category']}"
+        )
 
-        print(f"{app}: {format_duration(total_duration)} ({percentage:.1f}%) - {category}")
-
-        ## the window titles are what make an app's time interpretable,
-        ## so break each app down by what was actually on screen
-        titles = [
-            (title, duration)
-            for (title_app, title), duration in by_value(title_totals)
-            if title_app == app
-        ][:TITLES_PER_APP]
-
-        for title, duration in titles:
-            share = (duration / total_duration) * 100
-            print(f"    {title}: {format_duration(duration)} ({share:.0f}%)")
+        ## window titles are what make an app's time interpretable
+        for title in app["titles"]:
+            print(
+                f"    {title['title']}: {format_duration(title['seconds'])} "
+                f"({title['share_of_app']:.0f}%)"
+            )
 
     print("\n===== TOTAL TIME BY CATEGORY =====")
 
-    ## finds total time by category
-    for category, total_duration in by_value(category_totals):
-        percentage = (total_duration / active_total) * 100
-
-        print(f"{category}: {format_duration(total_duration)} ({percentage:.1f}%)")
-
-    print(f"\nActive time: {format_duration(active_total)}")
-
-    if idle_total:
-        tracked = active_total + idle_total
+    for category in summary["categories"]:
         print(
-            f"Idle time:   {format_duration(idle_total)} "
-            f"({(idle_total / tracked) * 100:.1f}% of {format_duration(tracked)} tracked)"
+            f"{category['category']}: {format_duration(category['seconds'])} "
+            f"({category['share']}%)"
+        )
+
+    print(f"\nActive time: {format_duration(summary['active_seconds'])}")
+
+    if summary["idle_seconds"]:
+        share = (summary["idle_seconds"] / summary["tracked_seconds"]) * 100
+        print(
+            f"Idle time:   {format_duration(summary['idle_seconds'])} "
+            f"({share:.1f}% of {format_duration(summary['tracked_seconds'])} tracked)"
         )
 
 
-categorize_pending_apps()
+def print_week(connection):
+    totals = queries.daily_totals(connection, days=7)
+    categories = queries.category_totals(connection, days=7)
 
-category_map = load_category_map()
-today = datetime.now().strftime("%Y-%m-%d")
-rows = rows_for_day(today)
+    print("===== LAST 7 DAYS =====")
 
-print(f"Activity for {today}\n")
+    busiest = max((day["active_seconds"] for day in totals), default=0)
 
-print_timeline(rows, category_map)
-print_summary(rows, category_map)
+    for day in totals:
+        # Simple inline bar so trends are visible without a charting library.
+        width = int((day["active_seconds"] / busiest) * 30) if busiest else 0
+        bar = "#" * width
 
-connection.close()
+        print(f"{day['date']}  {format_duration(day['active_seconds']):>10}  {bar}")
+
+    if categories["active_seconds"]:
+        print("\n===== CATEGORIES THIS WEEK =====")
+
+        for category in categories["categories"]:
+            print(
+                f"{category['category']}: {format_duration(category['seconds'])} "
+                f"({category['share']}%)"
+            )
+
+        print(f"\nTotal active: {format_duration(categories['active_seconds'])}")
+
+
+def main(argv):
+    connection = db.connect()
+
+    try:
+        if "--days" in argv:
+            days = queries.tracked_days(connection)
+            print("Days with recorded activity:")
+
+            for day in days or []:
+                print(" ", day)
+
+            if not days:
+                print("  (none yet)")
+
+            return
+
+        prompt_for_categories(connection)
+
+        if "--week" in argv:
+            print_week(connection)
+            return
+
+        day = next((arg for arg in argv if not arg.startswith("-")), queries.today())
+
+        print(f"Activity for {day}\n")
+        print_timeline(connection, day)
+        print_summary(connection, day)
+    finally:
+        connection.close()
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
