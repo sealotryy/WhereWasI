@@ -54,3 +54,17 @@ export const setAppCategory = (app, category) =>
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ category }),
   });
+
+export const categorizeWithAI = (date) =>
+  request("/api/ai/categorize", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ date }),
+  });
+
+export const previewAI = (date) =>
+  request("/api/ai/preview", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ date }),
+  });

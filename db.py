@@ -69,6 +69,24 @@ def ensure_schema(connection):
         "CREATE INDEX IF NOT EXISTS idx_activities_start_time ON activities (start_time)"
     )
 
+    # AI-generated category suggestions cached per activity record so we
+    # don't call Gemini twice for the same window title. Separate from
+    # app_categories so the user can review suggestions before applying them.
+    connection.execute("""
+    CREATE TABLE IF NOT EXISTS ai_classifications (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        activity_id INTEGER NOT NULL UNIQUE,
+        app TEXT NOT NULL,
+        title TEXT,
+        category TEXT NOT NULL,
+        confidence REAL,
+        reason TEXT,
+        model_name TEXT,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (activity_id) REFERENCES activities(id)
+    )
+    """)
+
     # Idle stretches are stored as ordinary rows under a reserved app name,
     # so make sure they always resolve to a sensible category.
     connection.execute(
