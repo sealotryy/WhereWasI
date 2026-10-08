@@ -19,6 +19,8 @@ code, and the API binds to localhost only.
 | `api.py` | Local HTTP API over `queries.py`. |
 | `dashboard/` | React dashboard served separately. Reads the API, writes categories. |
 | `test.py` | Diagnostic that checks the system probes work. |
+| `privacy.py` | Strips sensitive data from activity before sending to Gemini. |
+| `ai_categorizer.py` | Calls Gemini with structured JSON output and validates the response. |
 
 ## Setup
 
@@ -121,6 +123,51 @@ npm run build
 `dist/` can then be served by any static file server. The API's allowed origins
 are listed in `DEV_ORIGINS` in `api.py`; if you serve the build from a different
 port, add it there or the browser will block the requests.
+
+## AI categorization
+
+The dashboard has an **Analyze with Gemini** button that sends sanitized
+activity records to Google's Gemini API and returns suggested categories per
+window title. It is opt-in: nothing is sent until you click the button and
+confirm the preview.
+
+### Setup
+
+Get a Gemini API key at <https://aistudio.google.com/apikey>, then create a
+`.env` file in the project root:
+
+```bash
+cp .env.example .env
+# Edit .env and paste your key:
+# GEMINI_API_KEY=your_key_here
+```
+
+Install the Python dependencies (including `google-genai` and `python-dotenv`):
+
+```bash
+pip install -r requirements.txt
+```
+
+### Privacy
+
+Before anything is sent to Gemini, each activity record passes through
+`privacy.py`, which:
+
+- Skips records from sensitive apps or titles (banking, email, password
+  managers, health, localhost, file://)
+- Strips URL query strings, fragments, and embedded credentials from window titles
+- Truncates titles to 200 characters
+
+The confirmation dialog shows exactly how many records will be sent and a
+sample of what they look like. Gemini results are cached in SQLite per
+activity record, so repeated calls for the same day do not re-query the API.
+
+### Endpoints
+
+- `POST /api/ai/preview` — returns counts and sample records without calling Gemini
+- `POST /api/ai/categorize` — sends sanitized records to Gemini and returns classifications
+
+Both accept `{"date": "YYYY-MM-DD"}` and default to today.
 
 ## Notes on the data
 
