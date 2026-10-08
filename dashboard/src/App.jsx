@@ -129,6 +129,7 @@ export default function App() {
     setAiLoading(true);
     setAiError(null);
     setAiPreview(null);
+    setAiResults(null);
 
     try {
       const preview = await api.previewAI(date);
@@ -158,6 +159,8 @@ export default function App() {
 
   const cancelAnalyze = () => {
     setAiPreview(null);
+    setAiResults(null);
+    setAiError(null);
     setAiOpen(false);
   };
 

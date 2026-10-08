@@ -17,17 +17,18 @@ from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-import db
-import queries
-import privacy
-import ai_categorizer
-
-# Load .env if python-dotenv is available so GEMINI_API_KEY works from a file.
+# Load .env before importing ai_categorizer so GEMINI_MODEL is read
+# from the .env file, not from the environment before dotenv loads.
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
     pass
+
+import db
+import queries
+import privacy
+import ai_categorizer
 
 # Vite and Create React App defaults, so the dashboard can call the API during
 # development while it is served from its own dev server.
@@ -306,34 +307,39 @@ def ai_categorize(
         raise HTTPException(status_code=404, detail="no activity found for this date")
 
     # Check the cache: which activity IDs already have a classification?
+    # SQLite has a default limit of 999 bound parameters per query, so
+    # chunk large days into batches of 500 IDs per lookup.
     cached = {}
     activity_ids = [r["id"] for r in records]
-    placeholders = ",".join("?" * len(activity_ids))
-    cached_rows = connection.execute(
-        f"""
-        SELECT ac.activity_id, ac.app, ac.title, ac.category, ac.confidence, ac.reason
-        FROM ai_classifications ac
-        WHERE ac.activity_id IN ({placeholders})
-        """,
-        activity_ids,
-    ).fetchall()
+    CHUNK_SIZE = 500
 
-    for activity_id, app, title, category, confidence, reason in cached_rows:
-        cached[activity_id] = {
-            "id": activity_id,
-            "app": app,
-            "title": title or "",
-            "category": category,
-            "confidence": confidence,
-            "reason": reason,
-            "source": "cache",
-        }
+    for i in range(0, len(activity_ids), CHUNK_SIZE):
+        chunk = activity_ids[i : i + CHUNK_SIZE]
+        placeholders = ",".join("?" * len(chunk))
+        cached_rows = connection.execute(
+            f"""
+            SELECT ac.activity_id, ac.app, ac.title, ac.category, ac.confidence, ac.reason
+            FROM ai_classifications ac
+            WHERE ac.activity_id IN ({placeholders})
+            """,
+            chunk,
+        ).fetchall()
+
+        for activity_id, app, title, category, confidence, reason in cached_rows:
+            cached[activity_id] = {
+                "id": activity_id,
+                "app": app,
+                "title": title or "",
+                "category": category,
+                "confidence": confidence,
+                "reason": reason,
+                "source": "cache",
+            }
 
     # Records not in the cache need to be sent to Gemini.
     uncached = [r for r in records if r["id"] not in cached]
 
     new_classifications = []
-    error_message = None
 
     if uncached:
         try:
@@ -367,9 +373,11 @@ def ai_categorize(
                 )
             connection.commit()
         except ai_categorizer.GeminiConfigError as exc:
-            error_message = str(exc)
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
         except Exception as exc:
-            error_message = f"Gemini request failed: {exc}"
+            raise HTTPException(
+                status_code=502, detail=f"Gemini request failed: {exc}"
+            ) from exc
 
     # Merge cached + new results.
     all_results = list(cached.values())
@@ -391,7 +399,6 @@ def ai_categorize(
         "results": all_results,
         "skipped_sensitive": skipped,
         "total_records": len(records),
-        "error": error_message,
     }
 
 
