@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import * as api from "./api";
 import { relativeTime, shiftDay, todayKey } from "./format";
 import {
+  AIInsights,
   AppBreakdown,
   CategoryChart,
   EmptyDay,
@@ -29,6 +30,10 @@ export default function App() {
   const [categories, setCategories] = useState({ uncategorized: [], categories: [] });
   const [error, setError] = useState(null);
   const [saving, setSaving] = useState(false);
+  const [aiResults, setAiResults] = useState(null);
+  const [aiError, setAiError] = useState(null);
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiOpen, setAiOpen] = useState(false);
 
   const isToday = date === todayKey();
 
@@ -118,6 +123,35 @@ export default function App() {
     }
   };
 
+  const analyzeWithAI = async () => {
+    setAiOpen(true);
+    setAiLoading(true);
+    setAiError(null);
+
+    try {
+      const result = await api.categorizeWithAI(date);
+      setAiResults(result.results);
+      setAiError(result.error);
+    } catch (err) {
+      setAiError(err.message);
+    } finally {
+      setAiLoading(false);
+    }
+  };
+
+  const acceptAICategory = async (app, category) => {
+    setSaving(true);
+
+    try {
+      await api.setAppCategory(app, category);
+      await Promise.all([loadDay(date), loadShared()]);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const trackerStopped =
     status && !status.tracking && status.last_seen && isToday;
 
@@ -167,6 +201,26 @@ export default function App() {
                 <Timeline sessions={data.sessions} date={date} />
               )}
             </>
+          )}
+
+          {hasActivity && (
+            <button
+              className="btn btn-ai"
+              onClick={analyzeWithAI}
+              disabled={aiLoading}
+            >
+              {aiLoading ? "Analyzing…" : "✨ Analyze with Gemini"}
+            </button>
+          )}
+
+          {aiOpen && (
+            <AIInsights
+              results={aiResults}
+              error={aiError}
+              loading={aiLoading}
+              onAccept={acceptAICategory}
+              onClose={() => setAiOpen(false)}
+            />
           )}
 
           {trend.length > 0 && (

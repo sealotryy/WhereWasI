@@ -556,3 +556,77 @@ export function Triage({ apps, knownCategories, onAssign, busy }) {
     </section>
   );
 }
+
+
+/* ---------------------------------------------------------------- AI Insights */
+
+export function AIInsights({ results, error, loading, onAccept, onClose }) {
+  if (loading) {
+    return (
+      <section className="card ai-insights">
+        <div className="ai-insights-header">
+          <h2>AI Insights</h2>
+          <button className="btn btn-ghost" onClick={onClose}>Close</button>
+        </div>
+        <p className="ai-loading">Analyzing sanitized activity with Gemini…</p>
+      </section>
+    )
+  }
+
+  if (error) {
+    return (
+      <section className="card ai-insights">
+        <div className="ai-insights-header">
+          <h2>AI Insights</h2>
+          <button className="btn btn-ghost" onClick={onClose}>Close</button>
+        </div>
+        <p className="ai-error">{error}</p>
+      </section>
+    )
+  }
+
+  if (!results || results.length === 0) return null
+
+  return (
+    <section className="card ai-insights">
+      <div className="ai-insights-header">
+        <h2>AI Insights</h2>
+        <button className="btn btn-ghost" onClick={onClose}>Close</button>
+      </div>
+
+      <p className="ai-summary">
+        Gemini categorized {results.length} app{results.length !== 1 ? "s" : ""}.
+        {" "}{results.filter((r) => r.source === "gemini").length} new,
+        {" "}{results.filter((r) => r.source === "cache").length} from cache.
+      </p>
+
+      <ul className="ai-list">
+        {results.map((item) => (
+          <li key={item.app} className="ai-item">
+            <div className="ai-item-main">
+              <span className="ai-app">{item.app}</span>
+              <span className="ai-category">{item.category}</span>
+              <span className="ai-source">{item.source}</span>
+            </div>
+            {item.reason && <p className="ai-reason">{item.reason}</p>}
+            <div className="ai-bar">
+              <div
+                className="ai-bar-fill"
+                style={{ width: `${Math.round(item.confidence * 100)}%` }}
+              />
+              <span className="ai-confidence">
+                {Math.round(item.confidence * 100)}%
+              </span>
+            </div>
+            <button
+              className="btn btn-small"
+              onClick={() => onAccept(item.app, item.category)}
+            >
+              Accept
+            </button>
+          </li>
+        ))}
+      </ul>
+    </section>
+  )
+}

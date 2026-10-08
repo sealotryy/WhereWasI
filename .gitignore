@@ -6,3 +6,6 @@ __pycache__/
 # Personal activity data should never be committed
 activity.db
 activity.db-journal
+
+# Environment variables (Gemini API key, etc.)
+.env
