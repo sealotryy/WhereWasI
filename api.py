@@ -22,6 +22,13 @@ import queries
 import privacy
 import ai_categorizer
 
+# Load .env if python-dotenv is available so GEMINI_API_KEY works from a file.
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 # Vite and Create React App defaults, so the dashboard can call the API during
 # development while it is served from its own dev server.
 DEV_ORIGINS = [
@@ -207,23 +214,16 @@ def set_category(
     return {"app": app_name, "category": category}
 
 
-@app.post("/api/ai/categorize")
-def ai_categorize(
-    request: CategorizeRequest,
-    connection=Depends(get_connection),
-):
-    """Categorize apps for a day using Gemini.
+def _gather_day_activity(connection, day: str | None):
+    """Collect and sanitize activity records for a day.
 
-    Sends only sanitized app names and window titles to Gemini. Returns
-    suggested categories with confidence scores. Results are cached in
-    ai_classifications so repeated calls don't re-query Gemini.
+    Returns (records, skipped_count) where records is a list of dicts with
+    id, app, title, and duration_seconds. Sensitive apps/titles are skipped.
     """
-    day = valid_day(request.date)
 
-    # Gather all activity for the selected day, grouped by app.
     rows = connection.execute(
         """
-        SELECT app, window_title, duration
+        SELECT id, app, window_title, duration
         FROM activities
         WHERE date(start_time, 'unixepoch', 'localtime') = ?
           AND app != ?
@@ -232,51 +232,112 @@ def ai_categorize(
         (day or queries.today(), db.IDLE_APP),
     ).fetchall()
 
-    if not rows:
-        raise HTTPException(status_code=404, detail="no activity found for this date")
-
-    # Build privacy-safe records, skipping sensitive apps/titles.
     records = []
     skipped = 0
-    for app_name, window_title, duration in rows:
+
+    for activity_id, app_name, window_title, duration in rows:
         safe = privacy.prepare_for_ai(app_name, window_title or "", duration or 0)
         if safe:
-            records.append(safe)
+            records.append(
+                {
+                    "id": activity_id,
+                    "app": safe["app"],
+                    "title": safe["title"],
+                    "duration_seconds": safe["duration_seconds"],
+                }
+            )
         else:
             skipped += 1
 
-    if not records:
-        raise HTTPException(
-            status_code=422,
-            detail="all activity was filtered by privacy rules; nothing to send",
-        )
+    return records, skipped
 
-    # Check the cache: which apps already have a classification?
+
+@app.post("/api/ai/preview")
+def ai_preview(
+    request: CategorizeRequest,
+    connection=Depends(get_connection),
+):
+    """Preview what would be sent to Gemini without actually calling it.
+
+    Returns the sanitized records and counts so the dashboard can show a
+    confirmation dialog before the user approves the AI request.
+    """
+
+    day = valid_day(request.date)
+    records, skipped = _gather_day_activity(connection, day)
+
+    if not records:
+        raise HTTPException(status_code=404, detail="no activity found for this date")
+
+    # Return only a sample for the preview, plus the full count.
+    sample = records[:5]
+
+    return {
+        "date": day or queries.today(),
+        "total_records": len(records),
+        "skipped_sensitive": skipped,
+        "sample": [
+            {
+                "app": r["app"],
+                "title": r["title"][:80],
+                "duration_seconds": r["duration_seconds"],
+            }
+            for r in sample
+        ],
+    }
+
+
+@app.post("/api/ai/categorize")
+def ai_categorize(
+    request: CategorizeRequest,
+    connection=Depends(get_connection),
+):
+    """Categorize activity records for a day using Gemini.
+
+    Sends only sanitized app names and window titles to Gemini. Returns
+    suggested categories per record with confidence scores. Results are
+    cached in ai_classifications so repeated calls don't re-query Gemini.
+    """
+
+    day = valid_day(request.date)
+    records, skipped = _gather_day_activity(connection, day)
+
+    if not records:
+        raise HTTPException(status_code=404, detail="no activity found for this date")
+
+    # Check the cache: which activity IDs already have a classification?
     cached = {}
-    app_names = [r["app"] for r in records]
-    placeholders = ",".join("?" * len(app_names))
+    activity_ids = [r["id"] for r in records]
+    placeholders = ",".join("?" * len(activity_ids))
     cached_rows = connection.execute(
-        f"SELECT app, category, confidence, reason FROM ai_classifications WHERE app IN ({placeholders})",
-        app_names,
+        f"""
+        SELECT ac.activity_id, ac.app, ac.title, ac.category, ac.confidence, ac.reason
+        FROM ai_classifications ac
+        WHERE ac.activity_id IN ({placeholders})
+        """,
+        activity_ids,
     ).fetchall()
-    for app_name, category, confidence, reason in cached_rows:
-        cached[app_name] = {
-            "app": app_name,
+
+    for activity_id, app, title, category, confidence, reason in cached_rows:
+        cached[activity_id] = {
+            "id": activity_id,
+            "app": app,
+            "title": title or "",
             "category": category,
             "confidence": confidence,
             "reason": reason,
             "source": "cache",
         }
 
-    # Apps not in the cache need to be sent to Gemini.
-    uncached_records = [r for r in records if r["app"] not in cached]
+    # Records not in the cache need to be sent to Gemini.
+    uncached = [r for r in records if r["id"] not in cached]
 
     new_classifications = []
     error_message = None
 
-    if uncached_records:
+    if uncached:
         try:
-            new_classifications = ai_categorizer.categorize_apps(uncached_records)
+            new_classifications = ai_categorizer.categorize_activities(uncached)
 
             from datetime import datetime, timezone
             now = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -284,9 +345,9 @@ def ai_categorize(
                 connection.execute(
                     """
                     INSERT INTO ai_classifications
-                        (app, category, confidence, reason, model_name, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(app) DO UPDATE SET
+                        (activity_id, app, title, category, confidence, reason, model_name, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(activity_id) DO UPDATE SET
                         category = excluded.category,
                         confidence = excluded.confidence,
                         reason = excluded.reason,
@@ -294,7 +355,9 @@ def ai_categorize(
                         created_at = excluded.created_at
                     """,
                     (
+                        item["id"],
                         item["app"],
+                        item["title"],
                         item["category"],
                         item["confidence"],
                         item["reason"],
@@ -313,7 +376,9 @@ def ai_categorize(
     for item in new_classifications:
         all_results.append(
             {
+                "id": item["id"],
                 "app": item["app"],
+                "title": item["title"],
                 "category": item["category"],
                 "confidence": item["confidence"],
                 "reason": item["reason"],
@@ -325,7 +390,7 @@ def ai_categorize(
         "date": day or queries.today(),
         "results": all_results,
         "skipped_sensitive": skipped,
-        "total_apps": len(records),
+        "total_records": len(records),
         "error": error_message,
     }
 

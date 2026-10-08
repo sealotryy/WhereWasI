@@ -69,18 +69,21 @@ def ensure_schema(connection):
         "CREATE INDEX IF NOT EXISTS idx_activities_start_time ON activities (start_time)"
     )
 
-    # AI-generated category suggestions cached per app so we don't call Gemini
-    # twice for the same app without a reason. Separate from app_categories so
-    # the user can review and accept suggestions before they take effect.
+    # AI-generated category suggestions cached per activity record so we
+    # don't call Gemini twice for the same window title. Separate from
+    # app_categories so the user can review suggestions before applying them.
     connection.execute("""
     CREATE TABLE IF NOT EXISTS ai_classifications (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        app TEXT NOT NULL UNIQUE,
+        activity_id INTEGER NOT NULL UNIQUE,
+        app TEXT NOT NULL,
+        title TEXT,
         category TEXT NOT NULL,
         confidence REAL,
         reason TEXT,
         model_name TEXT,
-        created_at TEXT NOT NULL
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (activity_id) REFERENCES activities(id)
     )
     """)
 

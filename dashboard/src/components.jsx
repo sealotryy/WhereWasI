@@ -560,20 +560,35 @@ export function Triage({ apps, knownCategories, onAssign, busy }) {
 
 /* ---------------------------------------------------------------- AI Insights */
 
-export function AIInsights({ results, error, loading, onAccept, onClose }) {
-  if (loading) {
+export function AIInsights({ results, preview, error, loading, onAccept, onConfirm, onCancel, onClose }) {
+  // Loading state (no preview yet, no results yet)
+  if (loading && !preview && !results) {
     return (
       <section className="card ai-insights">
         <div className="ai-insights-header">
           <h2>AI Insights</h2>
           <button className="btn btn-ghost" onClick={onClose}>Close</button>
         </div>
-        <p className="ai-loading">Analyzing sanitized activity with Gemini…</p>
+        <p className="ai-loading">Preparing sanitized activity for review…</p>
       </section>
     )
   }
 
-  if (error) {
+  // Loading state (Gemini call in progress after confirmation)
+  if (loading && preview) {
+    return (
+      <section className="card ai-insights">
+        <div className="ai-insights-header">
+          <h2>AI Insights</h2>
+          <button className="btn btn-ghost" onClick={onClose}>Close</button>
+        </div>
+        <p className="ai-loading">Analyzing {preview.total_records} sanitized records with Gemini…</p>
+      </section>
+    )
+  }
+
+  // Error state
+  if (error && !results) {
     return (
       <section className="card ai-insights">
         <div className="ai-insights-header">
@@ -585,7 +600,67 @@ export function AIInsights({ results, error, loading, onAccept, onClose }) {
     )
   }
 
+  // Preview/confirmation state
+  if (preview && !results) {
+    return (
+      <section className="card ai-insights">
+        <div className="ai-insights-header">
+          <h2>AI Insights</h2>
+          <button className="btn btn-ghost" onClick={onClose}>Close</button>
+        </div>
+
+        <p className="ai-summary">
+          Gemini will receive {preview.total_records} sanitized activity record{preview.total_records !== 1 ? "s" : ""}
+          {preview.skipped_sensitive > 0 && ` (${preview.skipped_sensitive} sensitive records skipped)`}.
+        </p>
+
+        <div className="ai-preview-info">
+          <p className="ai-preview-label">Shared with Gemini:</p>
+          <ul className="ai-preview-list">
+            <li>App names</li>
+            <li>Sanitized window titles (no URL query strings or fragments)</li>
+            <li>Duration in seconds</li>
+          </ul>
+          <p className="ai-preview-label">Not shared:</p>
+          <ul className="ai-preview-list">
+            <li>Full URLs, query parameters, or fragments</li>
+            <li>Page content, cookies, or authentication data</li>
+            <li>Activity from sensitive domains (banking, email, health, localhost)</li>
+          </ul>
+        </div>
+
+        {preview.sample.length > 0 && (
+          <div className="ai-preview-sample">
+            <p className="ai-preview-label">Sample records:</p>
+            <ul className="ai-list">
+              {preview.sample.map((item, i) => (
+                <li key={i} className="ai-item">
+                  <div className="ai-item-main">
+                    <span className="ai-app">{item.app}</span>
+                    <span className="ai-title-preview">{item.title}</span>
+                    <span className="ai-source">{Math.round(item.duration_seconds)}s</span>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        <div className="ai-actions">
+          <button className="btn" onClick={onCancel}>Cancel</button>
+          <button className="btn btn-ai" onClick={onConfirm}>
+            Analyze {preview.total_records} record{preview.total_records !== 1 ? "s" : ""}
+          </button>
+        </div>
+      </section>
+    )
+  }
+
+  // Results state
   if (!results || results.length === 0) return null
+
+  const newCount = results.filter((r) => r.source === "gemini").length
+  const cachedCount = results.filter((r) => r.source === "cache").length
 
   return (
     <section className="card ai-insights">
@@ -594,17 +669,19 @@ export function AIInsights({ results, error, loading, onAccept, onClose }) {
         <button className="btn btn-ghost" onClick={onClose}>Close</button>
       </div>
 
+      {error && <p className="ai-error">{error}</p>}
+
       <p className="ai-summary">
-        Gemini categorized {results.length} app{results.length !== 1 ? "s" : ""}.
-        {" "}{results.filter((r) => r.source === "gemini").length} new,
-        {" "}{results.filter((r) => r.source === "cache").length} from cache.
+        Gemini categorized {results.length} record{results.length !== 1 ? "s" : ""}.
+        {" "}{newCount} new, {cachedCount} from cache.
       </p>
 
       <ul className="ai-list">
         {results.map((item) => (
-          <li key={item.app} className="ai-item">
+          <li key={item.id} className="ai-item">
             <div className="ai-item-main">
               <span className="ai-app">{item.app}</span>
+              {item.title && <span className="ai-title-preview">{item.title}</span>}
               <span className="ai-category">{item.category}</span>
               <span className="ai-source">{item.source}</span>
             </div>
@@ -622,7 +699,7 @@ export function AIInsights({ results, error, loading, onAccept, onClose }) {
               className="btn btn-small"
               onClick={() => onAccept(item.app, item.category)}
             >
-              Accept
+              Apply to app
             </button>
           </li>
         ))}

@@ -34,6 +34,7 @@ export default function App() {
   const [aiError, setAiError] = useState(null);
   const [aiLoading, setAiLoading] = useState(false);
   const [aiOpen, setAiOpen] = useState(false);
+  const [aiPreview, setAiPreview] = useState(null);
 
   const isToday = date === todayKey();
 
@@ -127,16 +128,37 @@ export default function App() {
     setAiOpen(true);
     setAiLoading(true);
     setAiError(null);
+    setAiPreview(null);
 
     try {
-      const result = await api.categorizeWithAI(date);
-      setAiResults(result.results);
-      setAiError(result.error);
+      const preview = await api.previewAI(date);
+      setAiPreview(preview);
     } catch (err) {
       setAiError(err.message);
     } finally {
       setAiLoading(false);
     }
+  };
+
+  const confirmAnalyze = async () => {
+    setAiLoading(true);
+    setAiError(null);
+
+    try {
+      const result = await api.categorizeWithAI(date);
+      setAiResults(result.results);
+      setAiError(result.error);
+      setAiPreview(null);
+    } catch (err) {
+      setAiError(err.message);
+    } finally {
+      setAiLoading(false);
+    }
+  };
+
+  const cancelAnalyze = () => {
+    setAiPreview(null);
+    setAiOpen(false);
   };
 
   const acceptAICategory = async (app, category) => {
@@ -209,16 +231,19 @@ export default function App() {
               onClick={analyzeWithAI}
               disabled={aiLoading}
             >
-              {aiLoading ? "Analyzing…" : "✨ Analyze with Gemini"}
+              {aiLoading ? "Analyzing…" : "Analyze with Gemini"}
             </button>
           )}
 
           {aiOpen && (
             <AIInsights
               results={aiResults}
+              preview={aiPreview}
               error={aiError}
               loading={aiLoading}
               onAccept={acceptAICategory}
+              onConfirm={confirmAnalyze}
+              onCancel={cancelAnalyze}
               onClose={() => setAiOpen(false)}
             />
           )}
