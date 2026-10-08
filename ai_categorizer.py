@@ -32,7 +32,7 @@ ALLOWED_CATEGORIES = [
     "Other",
 ]
 
-MODEL_NAME = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+MODEL_NAME = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
 
 # Maximum records sent to Gemini in a single request. Larger days are
 # batched to stay within token limits and keep response times reasonable.
